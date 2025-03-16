@@ -169,6 +169,7 @@ async def parse(file: UploadFile = File(...)) -> ParseResponse:
     context: FileContext = FileContext.from_file(file)
     markdown_str: str = await inference_as_markdown(context)
     maybe_zip_bytes: Optional[bytes] = create_b64_zipbytes(context.files)
+    markdown_str = markdown_str.replace(context.content_dir.as_posix(), ".")
     return ParseResponse(md=markdown_str, zip=maybe_zip_bytes)
 
 
