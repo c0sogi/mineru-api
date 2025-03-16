@@ -8,13 +8,13 @@ from typing import Literal, NamedTuple, Optional, cast
 from uuid import uuid4
 
 import magic_pdf.model as model_config
-from fastapi import APIRouter, FastAPI, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, UploadFile
+from fastapi.responses import Response
 from gotenberg_client import GotenbergClient
 from magic_pdf.config.enums import SupportedPdfParseMethod
 from magic_pdf.data.data_reader_writer import FileBasedDataWriter
 from magic_pdf.data.dataset import PymuDocDataset
 from magic_pdf.model.doc_analyze_by_custom_model import doc_analyze
-from magic_pdf.operators.models import InferenceResult
 from magic_pdf.operators.pipes import PipeResult
 from pydantic import BaseModel
 
@@ -47,11 +47,6 @@ class OfficeConverter:
             with client.libre_office.to_pdf() as route:
                 response = route.convert(office_file_path).run()
                 output_file_path.write_bytes(response.content)
-
-
-class ParseResponse(BaseModel):
-    md: str
-    zip: Optional[bytes] = None
 
 
 class FileContext(NamedTuple):
@@ -103,6 +98,28 @@ class FileContext(NamedTuple):
         return cls(file=file, content_dir=content_dir)
 
 
+class Result(NamedTuple):
+    context: FileContext
+    pipe_result: PipeResult
+
+    @classmethod
+    async def from_file(cls, file: UploadFile) -> "Result":
+        context = FileContext.from_file(file)
+        content_dir: str = context.content_dir.as_posix()
+        image_writer: FileBasedDataWriter = FileBasedDataWriter(content_dir)
+
+        ds = PymuDocDataset(await context.read_pdf())
+        classified = ds.classify()
+        if classified == SupportedPdfParseMethod.OCR:
+            infer_result = ds.apply(doc_analyze, ocr=True)
+            pipe_result = infer_result.pipe_ocr_mode(image_writer)
+        else:
+            infer_result = ds.apply(doc_analyze, ocr=False)
+            pipe_result = infer_result.pipe_txt_mode(image_writer)
+
+        return cls(context=context, pipe_result=cast(PipeResult, pipe_result))
+
+
 def create_b64_zipbytes(contents: dict[Path, bytes]) -> Optional[bytes]:
     if not contents:
         return None
@@ -115,62 +132,60 @@ def create_b64_zipbytes(contents: dict[Path, bytes]) -> Optional[bytes]:
         return b64encode(value)
 
 
-async def inference_as_markdown(context: FileContext) -> str:
-    content_dir: str = context.content_dir.as_posix()
-    image_writer: FileBasedDataWriter = FileBasedDataWriter(content_dir)
-
-    ds = PymuDocDataset(await context.read_pdf())
-    if ds.classify() == SupportedPdfParseMethod.OCR:
-        infer_result = ds.apply(doc_analyze, ocr=True)
-        pipe_result = infer_result.pipe_ocr_mode(image_writer)
-    else:
-        infer_result = ds.apply(doc_analyze, ocr=False)
-        pipe_result = infer_result.pipe_txt_mode(image_writer)
-
-    infer_result = cast(InferenceResult, infer_result)
-    pipe_result = cast(PipeResult, pipe_result)
-    return pipe_result.get_markdown(content_dir)
-
-    ### draw model result on each page
-    # infer_result.draw_model(os.path.join(local_md_dir, f"{name_without_suff}_model.pdf"))
-
-    ### get model inference result
-    # model_inference_result = infer_result.get_infer_res()
-
-    # ### draw layout result on each page
-    # pipe_result.draw_layout(os.path.join(local_md_dir, f"{name_without_suff}_layout.pdf"))
-
-    # ### draw spans result on each page
-    # pipe_result.draw_span(os.path.join(local_md_dir, f"{name_without_suff}_spans.pdf"))
-
-    # ### get markdown content
-    # md_content = pipe_result.get_markdown(image_dir)
-
-    # ### dump markdown
-    # pipe_result.dump_md(md_writer, f"{name_without_suff}.md", image_dir)
-
-    # ### get content list content
-    # content_list_content = pipe_result.get_content_list(image_dir)
-
-    # ### dump content list
-    # pipe_result.dump_content_list(md_writer, f"{name_without_suff}_content_list.json", image_dir)
-
-    # ### get middle json
-    # middle_json_content = pipe_result.get_middle_json()
-
-    # ### dump middle json
-    # pipe_result.dump_middle_json(md_writer, f"{name_without_suff}_middle.json")
-
-    # return (md_content, content_list_content)
+class ParseMarkdownResponse(BaseModel):
+    markdown: str
+    zipfile: Optional[bytes] = None
 
 
-@parse_router.post("/parse")
-async def parse(file: UploadFile = File(...)) -> ParseResponse:
-    context: FileContext = FileContext.from_file(file)
-    markdown_str: str = await inference_as_markdown(context)
-    maybe_zip_bytes: Optional[bytes] = create_b64_zipbytes(context.files)
-    markdown_str = markdown_str.replace(context.content_dir.as_posix(), ".")
-    return ParseResponse(md=markdown_str, zip=maybe_zip_bytes)
+@parse_router.post("/parse/markdown")
+async def parse_markdown(result: Result = Depends(Result.from_file)) -> ParseMarkdownResponse:
+    markdown_str = str(result.pipe_result.get_markdown(result.context.content_dir.as_posix()))
+    maybe_zip_bytes: Optional[bytes] = create_b64_zipbytes(result.context.files)
+    markdown_str = markdown_str.replace(result.context.content_dir.as_posix(), ".")
+    return ParseMarkdownResponse(markdown=markdown_str, zipfile=maybe_zip_bytes)
+
+
+@parse_router.post("/parse/middlejson")
+async def parse_middlejson(result: Result = Depends(Result.from_file)) -> Response:
+    json_str: str = result.pipe_result.get_middle_json()
+    return Response(content=json_str, media_type="application/json")
+
+
+@parse_router.post("/parse/contentlist")
+async def parse_contentlist(result: Result = Depends(Result.from_file)) -> Response:
+    json_str: str = result.pipe_result.get_middle_json()
+    return Response(content=json_str, media_type="application/json")
 
 
 app.include_router(parse_router, prefix="/api")
+### draw model result on each page
+# infer_result.draw_model(os.path.join(local_md_dir, f"{name_without_suff}_model.pdf"))
+
+### get model inference result
+# model_inference_result = infer_result.get_infer_res()
+
+# ### draw layout result on each page
+# pipe_result.draw_layout(os.path.join(local_md_dir, f"{name_without_suff}_layout.pdf"))
+
+# ### draw spans result on each page
+# pipe_result.draw_span(os.path.join(local_md_dir, f"{name_without_suff}_spans.pdf"))
+
+# ### get markdown content
+# md_content = pipe_result.get_markdown(image_dir)
+
+# ### dump markdown
+# pipe_result.dump_md(md_writer, f"{name_without_suff}.md", image_dir)
+
+# ### get content list content
+# content_list_content = pipe_result.get_content_list(image_dir)
+
+# ### dump content list
+# pipe_result.dump_content_list(md_writer, f"{name_without_suff}_content_list.json", image_dir)
+
+# ### get middle json
+# middle_json_content = pipe_result.get_middle_json()
+
+# ### dump middle json
+# pipe_result.dump_middle_json(md_writer, f"{name_without_suff}_middle.json")
+
+# return (md_content, content_list_content)
