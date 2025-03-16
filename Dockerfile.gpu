@@ -25,6 +25,7 @@ RUN poetry config virtualenvs.create false && \
 COPY . ./
 COPY magic-pdf.gpu.json /root/magic-pdf.json
 
-RUN python3.10 download_models.py
+RUN curl -L https://github.com/opendatalab/MinerU/raw/master/scripts/download_models_hf.py -o download_models_hf.py
+RUN python3.10 download_models_hf.py
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]

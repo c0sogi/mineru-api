@@ -34,7 +34,8 @@ COPY --from=build /usr/lib/x86_64-linux-gnu /usr/lib/x86_64-linux-gnu
 COPY --from=build /usr/local/bin/magic-pdf /usr/local/bin/magic-pdf
 COPY --from=build /usr/local/bin/uvicorn /usr/local/bin/uvicorn
 
-RUN python download_models.py
+RUN curl -L https://github.com/opendatalab/MinerU/raw/master/scripts/download_models_hf.py -o download_models_hf.py
+RUN python download_models_hf.py
 
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "3000"]
 
